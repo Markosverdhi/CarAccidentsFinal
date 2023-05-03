@@ -1,0 +1,153 @@
+---
+output: html_notebook
+---
+<head>
+  <style>
+    h1 {
+    margin-top: 1in;
+  }
+  </style>
+</head>
+<body>
+  <center><h1>STAT 184 Final Project: How City Density and Infrastructure Choices Affect Car Safety</h1></center>
+</body>
+<div>
+<center><b>Car dependence and navigating car infrastructure has become an integral part of our lives, for better or for worse. Car accidents are seen as something that is unavoidable, and every driver is told that it will happen to them at one point or another. However, is this mindset something that is causing us to overlook possible safety hazards in our infrastructure? Are there certain things that cause us to drive recklessly? This is what will be explored today.</b></center>
+</div>
+<br>
+<p style="margin-bottom: 0.5em;"><b>Today I will be using the following library packages:</b></p>
+```{r}
+library(usmap)
+library(ggplot2)
+library(maptools)
+library(dplyr)
+library(geosphere)
+library(dbscan)
+```
+
+<h2><center>Part 1: File Access and Exploration</center></h2>
+```{r}
+#gzip was used to serialize data for file size constraints
+#isolated paths
+PATH_TO_CAR_ACCIDENTS = "data/CarAccidents.csv.gz"
+PATH_TO_POP_DENSITY = "data/uscities.csv.gz"
+```
+
+```{r}
+#read files
+ca = gzfile(PATH_TO_CAR_ACCIDENTS,"rt")
+CarAccidents = read.csv(ca)
+
+cd = gzfile(PATH_TO_POP_DENSITY, "rt")
+USCities = read.csv(cd)
+```
+<div><center><b>I will now write some code to better visualize the data as-is. We will dig further down and look at relationships later.</center></b></div>
+```{r}
+#CarAccidents is too big
+CarAccidents <- CarAccidents[sample(nrow(CarAccidents), 200000), ]
+head(CarAccidents)
+head(USCities)
+```
+<br>
+<div><center><b>Here is a visualization of population density in the US. If there is some sort of connection between population density and car accidents, we will see them. Note that these two data sources are extremely vast, and we can cut much of it out to focus on more interesting areas once we have a better understanding of the dataset itself.</b></center></div>
+```{r}
+# Viewing US Population Density in a readable way
+Density <- USCities %>% 
+  filter(density > 300) %>% 
+  select(lng, lat, city, state_id, density)
+
+transformedUSC <- usmap_transform(Density, input_names = c("lng", "lat"))
+
+plot_usmap() +
+  geom_point(data = transformedUSC, aes(x = x, y = y, color = density, alpha = density),
+             size = 1) +
+  scale_color_gradient(low = "#FFD700", high = "#CC0000", limits = c(300, 8000), guide="colourbar") +
+  labs(title = "Population Density of the US",
+       size = "Density") +
+  theme(legend.position = "right") +
+  guides(alpha = "none")
+  
+
+```
+<div>
+  <center>
+    <b>We can see that the largest population densities can be seen in the Northeast, particularly in the Tri-state area. However, there are pockets of density in areas like Miami, Southern California, San Diego and Seattle.</b>
+    <br>
+    <b>It is difficult to plot each individual record of 1,500,000 car accidents, so I will take advantage of Density-Based Spatial Clustering of Applications with Noise. this will essentially group records that are nearby one-another, giving us an effective density chart. If the chart looks similar to the population density chart, one may assume that population density plays little to no role in Car Accidents.</b>
+  </center>
+</div>
+```{r}
+data <- CarAccidents[, c("Start_Lat", "Start_Lng")]
+
+# compute clusters using DBSCAN
+dbscan_res <- dbscan(data, eps = 0.1, minPts = 10)
+
+# transform cluster_data to work with plot_usmap
+cluster_data <- data.frame(lat = data$Start_Lat, lon = data$Start_Lng, cluster = as.factor(dbscan_res$cluster))
+cluster_data <- usmap_transform(cluster_data, input_names = c("lon", "lat"))
+
+# Count the number of occurrences of each cluster
+cluster_counts <- count(cluster_data, cluster)
+
+# Join the counts to the cluster data
+cluster_data_with_counts <- left_join(cluster_data, cluster_counts, by = "cluster")
+
+cluster_centers <- cluster_data_with_counts %>%
+  group_by(n) %>%
+  summarize(x = mean(x),
+            y = mean(y))
+plot_usmap() +
+  geom_point(data = cluster_centers, aes(x = x, y = y, size = n, color = n)) +
+  labs(title = "Concentration of Accidents in the US",
+       size = "Density") +
+  theme(legend.position = "none")
+  
+```
+
+<h2><center>Data Wrangling</center></h2>
+<center><b>Here you will see me narrow out all the data that does not fall within 50 miles of the top 200 cities. Now that we've seen that the actual density of the accident location doesn't have a meaningful impact on whether the accident will occur or not.</b></center>
+
+```{r}
+DensestCities <- Density %>%
+  top_n(200, density)
+
+truncate_coordinates <- function(truncated_table, constraint_table, threshold = 2) {
+  lat_diff <- truncated_table$lat - constraint_table$lat
+  lon_diff <- truncated_table$lon - constraint_table$lon
+  dist <- sqrt(lat_diff^2 + lon_diff^2)
+  truncated_data <- truncated_table[dist <= threshold, ]
+  return(truncated_data)
+}
+
+densest <- data.frame(lon = DensestCities$lng, lat = DensestCities$lat)
+```
+
+```{r}
+TruncatedCarAccidents <- CarAccidents %>%
+  rename(lat = Start_Lat, lon = Start_Lng) %>%
+  subset(select = -c(Number, Street, Side, Zipcode, Wind_Chill.F., Description)) %>%
+  truncate_coordinates(densest, 1)
+
+head(TruncatedCarAccidents)
+```
+
+<h2><center>Data Visualization</center></h2>
+<center><b>There are many different types of car-related infrastructure. Many can be quite problematic at times, causing more accidents than other types of infrastructure used. Here is a plot that demonstrates the prominence of some pieces of infrastructure in the dataset over others.</b> </center>
+```{r}
+variables <- c("Bump", "Crossing", "Junction", "No_Exit", "Railway", "Roundabout", "Station", "Stop", "Traffic_Calming", "Traffic_Signal")
+counts <- c()
+for (var in variables)
+  {
+    count <- sum(TruncatedCarAccidents[[var]] == "True")
+    counts <- c(counts, count)
+}
+InfrastructureCounts <-  data.frame(Infrastructure = variables, AccidentCount = counts)
+ggplot(InfrastructureCounts, aes(Infrastructure, AccidentCount))+
+  geom_col(position = position_dodge(width=0.5)) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+  labs(title = "Concentration of Accidents in the US")
+  
+```
+<center><b>As you can see, there are virtually no accidents in places with Roundabouts, Bumps and Traffic Calming. These pieces of infrastructure all share the traits that they force the driver to slow down, and they force the driver to pay attention to make sure they're doing the right thing. Something like a Junction allows for the driver to take turns that are far faster than they would anywhere else without having to be aware of anything around them. Similarly, the traffic signal does not require anyone to be aware of their surroundings; drivers will start moving when the light turns green regardless of what is going on around them.</b></center>
+<h3>Conclusion</h3>
+<center><b>It seems that there are many things we can do to decrease the number of accidents we see as city planners. Roundabouts pose as a valid replacement for traffic signals in larger areas. Junctions can be built in a way where traffic calming is in play, like the use of ribbed strips of road to encourage drivers to slow down. The accidents that occur in these areas should be considered the fault of the city planner. We cannot change the way that humans act as a whole; rather we must plan our city in a way that works with the natural human mind and tries to mitigate as much danger as possible given those constraints.</b></center>
